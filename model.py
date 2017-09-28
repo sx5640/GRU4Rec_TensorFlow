@@ -12,7 +12,54 @@ import numpy as np
 class GRU4Rec:
     
     def __init__(self, sess, args):
-        self.sess = sess
+        '''
+        Parameters
+        -----------
+        arg.loss : 'top1', 'bpr', 'cross-entropy', 'xe_logit', top1-max, bpr-max-<X>
+            selects the loss function, <X> is the parameter of the loss
+        arg.final_act : 'softmax', 'linear', 'relu', 'tanh', 'softmax_logit', 'leaky-<X>', elu-<X>
+            selects the activation function of the final layer, <X> is the parameter of the activation function
+        arg.hidden_act : 'tanh', 'relu' or 'linear'
+            selects the activation function on the hidden states
+        arg.layers : int
+            number of GRU layers
+        arg.rnn_size : int
+            number of GRU units in the layers
+        arg.n_epochs : int
+            number of training epochs (default: 10)
+        args.n_items : int
+            number of unique items in dataset
+        arg.batch_size : int
+            size of the minibacth, also effect the number of negative samples through minibatch based sampling (default: 50)
+        arg.learning_rate : float
+            learning rate (default: 0.05)
+        arg.decay : float
+            decay parameter for RMSProp, has no effect in other modes (default: 0.9)
+        arg.decay_steps : int
+            number of steps in each learning rate decay staircase
+        arg.grad_cap : float
+            clip gradients that exceede this value to this value, 0 means no clipping (default: 0.0)
+        arg.sigma : float
+            "width" of initialization; either the standard deviation or the min/max of the init interval (with normal and uniform initializations respectively); 0 means adaptive normalization (sigma depends on the size of the weight matrix); (default: 0)
+        arg.init_as_normal : boolean
+            False: init from uniform distribution on [-sigma,sigma]; True: init from normal distribution N(0,sigma); (default: False)
+        arg.reset_after_session : boolean
+            whether the hidden state is set to zero after a session finished (default: True)
+        arg.session_key : string
+            header of the session ID column in the input file (default: 'SessionId')
+        arg.item_key : string
+            header of the item ID column in the input file (default: 'ItemId')
+        arg.time_key : string
+            header of the timestamp column in the input file (default: 'Time')
+        arg.dropout_p_hidden : float
+            probability of dropout of hidden units (default: 0.5)
+        arg.checkpoint_dir : str
+            directory for saving model (default: './checkpoint')
+        '''
+
+        self.sess = sess        # set tensorflow session
+
+        ######## set args ########
         self.is_training = args.is_training
 
         self.layers = args.layers
@@ -67,9 +114,11 @@ class GRU4Rec:
         if not os.path.isdir(self.checkpoint_dir):
             raise Exception("[!] Checkpoint Dir not found")
 
-        self.build_model()
-        self.sess.run(tf.global_variables_initializer())
-        self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=10)
+        ######## set args end ########
+
+        self.build_model()      # build model
+        self.sess.run(tf.global_variables_initializer())        # initialize all TF variables
+        self.saver = tf.train.Saver(tf.global_variables(), max_to_keep=10)      # initialize TF saver
 
         if self.is_training:
             return
@@ -107,46 +156,64 @@ class GRU4Rec:
         return tf.reduce_mean(term1 - term2)
 
     def build_model(self):
-        
-        self.X = tf.placeholder(tf.int32, [self.batch_size], name='input')
-        self.Y = tf.placeholder(tf.int32, [self.batch_size], name='output')
-        self.state = [tf.placeholder(tf.float32, [self.batch_size, self.rnn_size], name='rnn_state') for _ in xrange(self.layers)]
+        # initialize placeholders
+        self.X = tf.placeholder(tf.int32, [self.batch_size], name='input')      # single float for each session
+        self.Y = tf.placeholder(tf.int32, [self.batch_size], name='output')     # single float for each session
+        self.state = [tf.placeholder(tf.float32, [self.batch_size, self.rnn_size], name='rnn_state') for _ in xrange(self.layers)]      # single float for each session and each neuron
         self.global_step = tf.Variable(0, name='global_step', trainable=False)
 
         with tf.variable_scope('gru_layer'):
+            #### define initializer ####
             sigma = self.sigma if self.sigma != 0 else np.sqrt(6.0 / (self.n_items + self.rnn_size))
             if self.init_as_normal:
                 initializer = tf.random_normal_initializer(mean=0, stddev=sigma)
             else:
                 initializer = tf.random_uniform_initializer(minval=-sigma, maxval=sigma)
-            embedding = tf.get_variable('embedding', [self.n_items, self.rnn_size], initializer=initializer)
-            softmax_W = tf.get_variable('softmax_w', [self.n_items, self.rnn_size], initializer=initializer)
-            softmax_b = tf.get_variable('softmax_b', [self.n_items], initializer=tf.constant_initializer(0.0))
+            #### ####
 
-            cell = rnn_cell.GRUCell(self.rnn_size, activation=self.hidden_act)
-            drop_cell = rnn_cell.DropoutWrapper(cell, output_keep_prob=self.dropout_p_hidden)
-            stacked_cell = rnn_cell.MultiRNNCell([drop_cell] * self.layers)
-            
-            inputs = tf.nn.embedding_lookup(embedding, self.X)
-            output, state = stacked_cell(inputs, tuple(self.state))
-            self.final_state = state
+            embedding = tf.get_variable('embedding', [self.n_items, self.rnn_size], initializer=initializer)        # define embedding layer, where maps n_item features to a lower dimension
 
+            #### output layer params ####
+            softmax_W = tf.get_variable('softmax_w', [self.n_items, self.rnn_size], initializer=initializer)        # output layer params, maps results from GRU layer to probabilistic distribution of all output
+            softmax_b = tf.get_variable('softmax_b', [self.n_items], initializer=tf.constant_initializer(0.0))      # output layer bias
+            #### ####
+
+            #### gru layer ####
+            cell = rnn_cell.GRUCell(self.rnn_size, activation=self.hidden_act)      # define single GRU layer
+            drop_cell = rnn_cell.DropoutWrapper(cell, output_keep_prob=self.dropout_p_hidden)       # apply dropout
+            stacked_cell = rnn_cell.MultiRNNCell([drop_cell] * self.layers)     # merge multiple GRU layers
+            #### ####
+
+            inputs = tf.nn.embedding_lookup(embedding, self.X)      # apply embedding before gru
+            output, state = stacked_cell(inputs, tuple(self.state))     # apply GRU layer
+            self.final_state = state        # record state of GRU layer
+
+        #### output layer for training ####
         if self.is_training:
             '''
             Use other examples of the minibatch as negative samples.
             '''
+            # here we only train on the [Y] subset of softmax_W, and the rest will be ignored. therefore the dimension of sample_W should be [len(Y), rnn_size]
             sampled_W = tf.nn.embedding_lookup(softmax_W, self.Y)
             sampled_b = tf.nn.embedding_lookup(softmax_b, self.Y)
+            # output layer output = final_act(sample_W*X.T) + sampled_b
             logits = tf.matmul(output, sampled_W, transpose_b=True) + sampled_b
             self.yhat = self.final_activation(logits)
+            # apply cost
             self.cost = self.loss_function(self.yhat)
+        #### ####
+
+        #### output layer for prediction ####
         else:
+            # for prediction, output = final_act(W*X) + b where W and b are the complete params matrix.
             logits = tf.matmul(output, softmax_W, transpose_b=True) + softmax_b
             self.yhat = self.final_activation(logits)
 
         if not self.is_training:
             return
+        #### ####
 
+        #### forward and backward propagation for training ####
         self.lr = tf.maximum(1e-5,tf.train.exponential_decay(self.learning_rate, self.global_step, self.decay_steps, self.decay, staircase=True)) 
         
         '''
@@ -157,78 +224,91 @@ class GRU4Rec:
         #optimizer = tf.train.AdadeltaOptimizer(self.lr)
         #optimizer = tf.train.RMSPropOptimizer(self.lr)
 
-        tvars = tf.trainable_variables()
-        gvs = optimizer.compute_gradients(self.cost, tvars)
+        #### forward propagation ####
+        tvars = tf.trainable_variables()        # [embedding, softmax_W, sofmax_b, gru [[Wz, Wr],[Uz, Ur]], gru [bz, br], gru [W, U], gru b
+        gvs = optimizer.compute_gradients(self.cost, tvars)     # this return ([gradient, all variables]...)
         if self.grad_cap > 0:
-            capped_gvs = [(tf.clip_by_norm(grad, self.grad_cap), var) for grad, var in gvs]
+            capped_gvs = [(tf.clip_by_norm(grad, self.grad_cap), var) for grad, var in gvs]     # apply gradient cap
         else:
-            capped_gvs = gvs 
+            capped_gvs = gvs
+        #### ####
+
+        #### backward propagation ####
         self.train_op = optimizer.apply_gradients(capped_gvs, global_step=self.global_step)
 
     def init(self, data):
-        data.sort([self.session_key, self.time_key], inplace=True)
+        data.sort_values([self.session_key, self.time_key], inplace=True)
         offset_sessions = np.zeros(data[self.session_key].nunique()+1, dtype=np.int32)
         offset_sessions[1:] = data.groupby(self.session_key).size().cumsum()
         return offset_sessions
     
     def fit(self, data):
+        # initializing function
         self.error_during_train = False
-        itemids = data[self.item_key].unique()
-        self.n_items = len(itemids)
+        itemids = data[self.item_key].unique()      # unique items
+        self.n_items = len(itemids)     # number of unique items
+
+        # map item ids to a set of numbers that start from 0
         self.itemidmap = pd.Series(data=np.arange(self.n_items), index=itemids)
         data = pd.merge(data, pd.DataFrame({self.item_key:itemids, 'ItemIdx':self.itemidmap[itemids].values}), on=self.item_key, how='inner')
-        offset_sessions = self.init(data)
+
+        offset_sessions = self.init(data)       # maps to starting points of each unique session in dataframe
+
         print('fitting model...')
+
+        # start epoch
         for epoch in xrange(self.n_epochs):
-            epoch_cost = []
-            state = [np.zeros([self.batch_size, self.rnn_size], dtype=np.float32) for _ in xrange(self.layers)]
-            session_idx_arr = np.arange(len(offset_sessions)-1)
-            iters = np.arange(self.batch_size)
-            maxiter = iters.max()
-            start = offset_sessions[session_idx_arr[iters]]
-            end = offset_sessions[session_idx_arr[iters]+1]
+            # initialize each epoch with placeholder vars
+            epoch_cost = []     # list of cost from each run
+            state = [np.zeros([self.batch_size, self.rnn_size], dtype=np.float32) for _ in xrange(self.layers)]     # keep record of state that send in to each round of training
+            session_idx_arr = np.arange(len(offset_sessions)-1)     # unique session ids that starts from 0
+            iters = np.arange(self.batch_size)      # session ids that goes into current round of training
+            maxiter = iters.max()   # id of the last session in current training
+            start = offset_sessions[session_idx_arr[iters]]     # starting position in dataframe of each session in current training round, which may or may not be the position of the first action
+            end = offset_sessions[session_idx_arr[iters]+1]     # ending position in dataframe of each session in current training round
             finished = False
-            while not finished:
-                minlen = (end-start).min()
-                out_idx = data.ItemIdx.values[start]
-                for i in range(minlen-1):
-                    in_idx = out_idx
-                    out_idx = data.ItemIdx.values[start+i+1]
+            while not finished:     # start current round
+                minlen = (end-start).min()      # min session length in current round == number of actions that goes in to current round
+                out_idx = data.ItemIdx.values[start]        # for each session in current round, initialize Y to be the item id of the first action in current round
+                for i in range(minlen-1):       # iterate through the minimum session length in current round
+                    in_idx = out_idx        # set X to be Y from previous action, which == data.ItemIdx.values[start+i]
+                    out_idx = data.ItemIdx.values[start+i+1]        # set Y to be the item id of next action
                     # prepare inputs, targeted outputs and hidden states
                     fetches = [self.cost, self.final_state, self.global_step, self.lr, self.train_op]
                     feed_dict = {self.X: in_idx, self.Y: out_idx}
                     for j in xrange(self.layers): 
-                        feed_dict[self.state[j]] = state[j]
+                        feed_dict[self.state[j]] = state[j]     # update state for all session that didn't start fresh this round
                     
-                    cost, state, step, lr, _ = self.sess.run(fetches, feed_dict)
-                    epoch_cost.append(cost)
-                    if np.isnan(cost):
+                    cost, state, step, lr, _ = self.sess.run(fetches, feed_dict)        # run tensorflow
+                    epoch_cost.append(cost)     # record cost
+                    if np.isnan(cost):      # error if no cost
                         print(str(epoch) + ':Nan error!')
                         self.error_during_train = True
                         return
-                    if step == 1 or step % self.decay_steps == 0:
+                    if step == 1 or step % self.decay_steps == 0:       # log at start of each epoch or start of each learning rate decay staircase
                         avgc = np.mean(epoch_cost)
                         print('Epoch {}\tStep {}\tlr: {:.6f}\tloss: {:.6f}'.format(epoch, step, lr, avgc))
-                start = start+minlen-1
-                mask = np.arange(len(iters))[(end-start)<=1]
-                for idx in mask:
-                    maxiter += 1
-                    if maxiter >= len(offset_sessions)-1:
+                start = start+minlen-1      # increment starting position by minlen-1 == the end position of current round
+                mask = np.arange(len(iters))[(end-start)<=1]        # batch id of the sessions ended in current round
+                for idx in mask:        # iterate through ended sessions
+                    maxiter += 1        # moves to the next session
+                    if maxiter >= len(offset_sessions)-1:       # if there is no session to pick, end current epoch
                         finished = True
                         break
-                    iters[idx] = maxiter
-                    start[idx] = offset_sessions[session_idx_arr[maxiter]]
-                    end[idx] = offset_sessions[session_idx_arr[maxiter]+1]
-                if len(mask) and self.reset_after_session:
+                    iters[idx] = maxiter        # change ended session to next session
+                    start[idx] = offset_sessions[session_idx_arr[maxiter]]      # set starting position of the newly added session
+                    end[idx] = offset_sessions[session_idx_arr[maxiter]+1]      # set ending position of the newly added session
+                if len(mask) and self.reset_after_session:      # reset state for new session
                     for i in xrange(self.layers):
                         state[i][mask] = 0
+            ######## epoch end ########
             
-            avgc = np.mean(epoch_cost)
-            if np.isnan(avgc):
+            avgc = np.mean(epoch_cost)      # average cost
+            if np.isnan(avgc):      # error if no average cost
                 print('Epoch {}: Nan error!'.format(epoch, avgc))
                 self.error_during_train = True
                 return
-            self.saver.save(self.sess, '{}/gru-model'.format(self.checkpoint_dir), global_step=epoch)
+            self.saver.save(self.sess, '{}/gru-model'.format(self.checkpoint_dir), global_step=epoch)       # save model
     
     def predict_next_batch(self, session_ids, input_item_ids, itemidmap, batch=50):
         '''

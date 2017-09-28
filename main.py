@@ -12,8 +12,8 @@ import argparse
 import model
 import evaluation
 
-PATH_TO_TRAIN = '/PATH/TO/rsc15_train_full.txt'
-PATH_TO_TEST = '/PATH/TO/rsc15_test.txt'
+PATH_TO_TRAIN = './data/rsc15_train_full.txt'
+PATH_TO_TEST = './data/rsc15_test.txt'
 
 class Args():
     is_training = False
